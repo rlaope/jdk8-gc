@@ -1,62 +1,183 @@
 # GC Throughput Test
 
-A Java-based test framework for comparing garbage collector throughput between G1GC and Parallel GC.
+JDK 8 G1GC Full GC 회피를 위한 트래픽 임계값 테스트 프레임워크
 
-## Overview
+## 핵심 목표
 
-This project provides a simple HTTP server that generates controlled memory pressure to benchmark different JVM garbage collectors. It's designed to help you understand the performance characteristics of:
+**JDK 8 G1GC에서 Full GC 없이 처리 가능한 최대 트래픽 수준 찾기**
 
-- **G1GC (Garbage-First Garbage Collector)**: Optimized for low-latency applications
-- **Parallel GC**: Optimized for maximum throughput
+### JDK 8 G1GC Full GC 문제점
 
-## Requirements
+- **Single-threaded**: JDK 8의 G1 Full GC는 단일 스레드로 동작
+- **P99 급등**: Full GC 발생 시 수백ms ~ 수초의 STW(Stop-The-World)
+- **예측 불가**: 갑자기 발생하여 서비스 품질 저하
 
-- Java 8 or higher
+## 요구사항
+
+- **Java 8** (OpenJDK 8 권장)
 - Bash shell (Linux/macOS/WSL)
-- curl (for load testing)
-- python3 (for results parsing)
+- curl
+- python3
 
-## Quick Start
+---
 
-### 1. Build the Project
+## 실행 방법 (Step by Step)
+
+### Step 1: 빌드
 
 ```bash
+cd gctrack
 ./scripts/build.sh
 ```
 
-### 2. Run with G1GC
+### Step 2: G1GC 서버 시작 (터미널 1)
 
 ```bash
+# 기본 설정 (힙 2GB)
 ./scripts/run-g1gc.sh
+
+# 또는 힙 크기 지정
+HEAP_SIZE=4g ./scripts/run-g1gc.sh
 ```
 
-### 3. Run with Parallel GC (in another terminal)
+서버가 시작되면 다음과 같이 출력됩니다:
+```
+============================================================
+GC Throughput Test Server
+============================================================
+JVM Information:
+  Java Version: 1.8.0_xxx
+Garbage Collectors:
+  G1 Young Generation
+  G1 Old Generation      ← 이것이 Full GC 포함
+============================================================
+Server started on port 8080
+```
+
+### Step 3: Full GC 회피 벤치마크 실행 (터미널 2)
 
 ```bash
-PORT=8081 ./scripts/run-parallel-gc.sh
+# G1GC Full GC 회피 테스트 (권장)
+./scripts/benchmark-g1gc-fullgc.sh
+
+# 또는 설정 변경
+HEAP_SIZE=4g \
+STEP_DURATION=60 \
+MAX_CONCURRENCY=200 \
+./scripts/benchmark-g1gc-fullgc.sh
 ```
 
-### 4. Run Benchmark
+### Step 4: 결과 확인
+
+```
+=============================================================================
+ 테스트 결과
+=============================================================================
+[중단 사유] Full GC 발생 (Old Gen GC: 1회)
+
+[Full GC 없이 안전한 트래픽 수준]
+
+  ┌─────────────────────────────────────────┐
+  │  최대 안전 동시접속: 25개
+  │  달성 TPS: 3200.50 req/s
+  └─────────────────────────────────────────┘
+```
+
+---
+
+## 벤치마크 스크립트 종류
+
+| 스크립트 | 용도 |
+|----------|------|
+| `benchmark-g1gc-fullgc.sh` | **G1GC Full GC 회피 테스트** (권장) |
+| `benchmark.sh` | 일반 처리량 벤치마크 |
+| `benchmark-compare.sh` | G1GC vs Parallel GC 비교 |
+
+---
+
+## G1GC Full GC 회피 테스트 상세
+
+### Full GC 발생 조건 (JDK 8 G1GC)
+
+```
+1. Allocation Failure
+   └─ Young Gen에서 객체 할당 실패
+   └─ Survivor 공간 부족으로 Old Gen으로 조기 승격
+
+2. Concurrent Mode Failure
+   └─ Concurrent Marking 중 Old Gen 가득 참
+   └─ Mixed GC가 충분히 빠르게 공간 확보 못함
+
+3. To-space Exhausted
+   └─ GC 중 객체 복사할 공간 부족
+   └─ Humongous 객체 할당 실패
+```
+
+### 테스트 종료 기준
+
+| 기준 | 기본값 | 설명 |
+|------|--------|------|
+| **Old Gen GC 발생** | 0회 | G1 Old Generation 수집 발생 시 즉시 중단 |
+| 힙 사용률 위험 | 85% | Full GC 직전 상태로 판단 |
+| 힙 사용률 경고 | 70% | 경고 표시 (계속 진행) |
+
+### 측정 지표
+
+| 지표 | 설명 | Full GC 관점 |
+|------|------|--------------|
+| TPS | 초당 처리량 | Full GC 시 급감 |
+| P99 | 99%ile 응답시간 | Full GC 시 급등 (수백ms~수초) |
+| Max | 최대 응답시간 | Full GC STW 시간 반영 |
+| 힙 사용률 | 현재 힙 사용량 | 높을수록 Full GC 위험 |
+| Old GC Count | Old Gen GC 횟수 | 0이어야 안전 |
+
+### 설정 파라미터
 
 ```bash
-# G1GC 벤치마크 (체계적인 TPS 측정)
-PORT=8080 ./scripts/benchmark.sh
+# Full GC 회피 테스트 설정
+HEAP_USAGE_WARN_PERCENT=70    # 힙 사용률 경고 기준 (%)
+HEAP_USAGE_STOP_PERCENT=85    # 힙 사용률 중단 기준 (%)
 
-# Parallel GC 벤치마크
-PORT=8081 ./scripts/benchmark.sh
+# 부하 설정
+INITIAL_CONCURRENCY=5         # 시작 동시접속
+CONCURRENCY_STEP=5            # 증가 단위
+MAX_CONCURRENCY=100           # 최대 동시접속
+STEP_DURATION=30              # 단계별 측정 시간 (초)
 
-# 또는 두 GC 비교 벤치마크
-./scripts/benchmark-compare.sh
+# 워밍업
+WARMUP_DURATION=30            # 워밍업 시간 (초)
 ```
+
+### 결과 해석 예시
+
+```
+동시접속   TPS        평균(ms)   P99(ms)    Max(ms)    힙(%)   OldGC   상태
+---------------------------------------------------------------------------------------------
+5          1250.00    4          8          15         35      0       OK
+10         2340.00    6          12         25         42      0       OK
+15         3100.00    9          18         40         55      0       OK
+20         3450.00    15         35         80         68      0       OK
+25         3200.00    45         98         150        75      0       힙 경고 (75%)
+30         2100.00    120        850        2500       88      1       FULL GC 발생!
+```
+
+**해석:**
+- 동시접속 20개까지: 안전 (Full GC 없음)
+- 동시접속 25개: 경고 수준 (힙 75%)
+- 동시접속 30개: Full GC 발생 → P99가 850ms, Max가 2.5초로 급등
+
+**권장:** 동시접속 20개 이하 유지 (안전 마진 적용 시 16개)
+
+---
 
 ## 테스트 진행 방식 상세 가이드
 
 ### 1. 테스트 목적
 
 이 벤치마크는 다음을 측정합니다:
+- **Full GC 없는 최대 트래픽**: JDK 8 G1GC에서 안전하게 처리 가능한 부하
 - **최대 처리량(TPS)**: 서버가 안정적으로 처리할 수 있는 초당 요청 수
 - **포화점(Saturation Point)**: 성능 저하가 시작되는 부하 수준
-- **GC 영향도**: 가비지 컬렉션이 애플리케이션 성능에 미치는 영향
 
 ### 2. 테스트 단계별 설명
 

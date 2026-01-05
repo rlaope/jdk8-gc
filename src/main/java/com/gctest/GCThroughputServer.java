@@ -203,6 +203,32 @@ public class GCThroughputServer {
             double avgLatencyUs = requests > 0 ?
                 (totalProcessingTimeNs.get() / 1000.0 / requests) : 0;
 
+            // G1GC Full GC 감지를 위한 Old Gen 통계
+            long oldGenCount = 0;
+            long oldGenTimeMs = 0;
+            long youngGenCount = 0;
+            long youngGenTimeMs = 0;
+
+            List<GarbageCollectorMXBean> gcBeans = ManagementFactory.getGarbageCollectorMXBeans();
+            for (GarbageCollectorMXBean gc : gcBeans) {
+                String name = gc.getName();
+                // G1 Old Generation = Mixed GC 또는 Full GC
+                // PS MarkSweep, CMS, G1 Old Generation 등이 Old Gen 수집기
+                if (name.contains("Old") || name.contains("MarkSweep") ||
+                    name.contains("CMS") || name.contains("Mark Sweep")) {
+                    oldGenCount = gc.getCollectionCount();
+                    oldGenTimeMs = gc.getCollectionTime();
+                } else {
+                    // Young Gen (G1 Young Generation, PS Scavenge, ParNew 등)
+                    youngGenCount = gc.getCollectionCount();
+                    youngGenTimeMs = gc.getCollectionTime();
+                }
+            }
+
+            // Old Gen GC 평균 시간 (Full GC 감지용)
+            // JDK8 G1 Full GC는 보통 수백ms ~ 수초 소요
+            double avgOldGcTimeMs = oldGenCount > 0 ? (double) oldGenTimeMs / oldGenCount : 0;
+
             StringBuilder sb = new StringBuilder();
             sb.append("{\n");
             sb.append("  \"uptime_ms\": ").append(uptime).append(",\n");
@@ -211,12 +237,23 @@ public class GCThroughputServer {
             sb.append("  \"avg_latency_us\": ").append(String.format("%.2f", avgLatencyUs)).append(",\n");
             sb.append("  \"memory\": {\n");
             sb.append("    \"heap_used\": \"").append(formatBytes(runtime.totalMemory() - runtime.freeMemory())).append("\",\n");
+            sb.append("    \"heap_used_bytes\": ").append(runtime.totalMemory() - runtime.freeMemory()).append(",\n");
             sb.append("    \"heap_total\": \"").append(formatBytes(runtime.totalMemory())).append("\",\n");
-            sb.append("    \"heap_max\": \"").append(formatBytes(runtime.maxMemory())).append("\"\n");
+            sb.append("    \"heap_max\": \"").append(formatBytes(runtime.maxMemory())).append("\",\n");
+            sb.append("    \"heap_max_bytes\": ").append(runtime.maxMemory()).append("\n");
             sb.append("  },\n");
-            sb.append("  \"gc\": [\n");
 
-            List<GarbageCollectorMXBean> gcBeans = ManagementFactory.getGarbageCollectorMXBeans();
+            // G1GC Full GC 핵심 지표
+            sb.append("  \"gc_summary\": {\n");
+            sb.append("    \"young_gc_count\": ").append(youngGenCount).append(",\n");
+            sb.append("    \"young_gc_time_ms\": ").append(youngGenTimeMs).append(",\n");
+            sb.append("    \"old_gc_count\": ").append(oldGenCount).append(",\n");
+            sb.append("    \"old_gc_time_ms\": ").append(oldGenTimeMs).append(",\n");
+            sb.append("    \"avg_old_gc_time_ms\": ").append(String.format("%.2f", avgOldGcTimeMs)).append(",\n");
+            sb.append("    \"full_gc_detected\": ").append(oldGenCount > 0).append("\n");
+            sb.append("  },\n");
+
+            sb.append("  \"gc\": [\n");
             for (int i = 0; i < gcBeans.size(); i++) {
                 GarbageCollectorMXBean gc = gcBeans.get(i);
                 sb.append("    {\n");
